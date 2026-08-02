@@ -5,12 +5,14 @@ import httpx
 from rich.console import Console
 from rich.table import Table
 
-from database import init_db, add_player, remove_player
+from database import init_db, add_player, remove_player, save_game_log, get_players
 from tracker import track_all_players, auto_track
 from api import search_players
+from watcher import watch_player, watch_all
 from display import (
     show_players, show_ranks, show_overview,
     show_heroes, show_hero_trend, show_rank_trend,
+    show_map_stats, show_teammate_stats, show_recent_games,
 )
 
 console = Console()
@@ -141,6 +143,91 @@ def ranktrend(player_id, role):
 def herotrend(player_id, hero, mode):
     """Show stat trend for a specific hero over time."""
     run(show_hero_trend(player_id, hero, mode))
+
+
+@cli.command("log-game")
+@click.argument("player_id")
+@click.argument("map_name")
+@click.argument("result", type=click.Choice(["win", "loss", "draw"]))
+@click.option("--hero", "-h", default=None, help="Hero you played.")
+@click.option("--mode", "-m", default="competitive", type=click.Choice(["competitive", "quickplay"]))
+@click.option("--teammates", "-t", multiple=True, help="Teammate BattleTags (repeat for each).")
+@click.option("--notes", "-n", default=None, help="Optional notes.")
+def log_game(player_id, map_name, result, hero, mode, teammates, notes):
+    """Record a game result for map and teammate tracking.
+
+    \b
+    Example:
+      log-game YourName-1234 Ilios win --hero ana -t Friend-5678 -t Other-9999
+    """
+    async def _log():
+        players = await get_players()
+        match = next((p for p in players if p["battletag"] == player_id), None)
+        if not match:
+            console.print(f"[red]Player {player_id} not found. Add them first.[/red]")
+            return
+        gid = await save_game_log(match["id"], map_name, result, hero, mode, list(teammates), notes)
+        color = "green" if result == "win" else "red" if result == "loss" else "yellow"
+        console.print(f"[{color}]Logged game #{gid}: {result.upper()} on {map_name}[/{color}]")
+    run(_log())
+
+
+@cli.command("map-stats")
+@click.argument("player_id")
+@click.option("--mode", "-m", default=None, type=click.Choice(["competitive", "quickplay"]))
+def map_stats(player_id, mode):
+    """Show W/L breakdown by map."""
+    run(show_map_stats(player_id, mode))
+
+
+@cli.command("teammate-stats")
+@click.argument("player_id")
+def teammate_stats(player_id):
+    """Show W/L breakdown by teammate."""
+    run(show_teammate_stats(player_id))
+
+
+@cli.command("games")
+@click.argument("player_id")
+@click.option("--limit", "-n", default=20)
+def games(player_id, limit):
+    """Show recent logged games."""
+    run(show_recent_games(player_id, limit))
+
+
+@cli.command("read-screen")
+@click.argument("player_id")
+@click.option("--interval", "-i", default=3, help="Seconds between screenshots (default 3).")
+@click.option("--monitor", "-m", default=1, help="Monitor index (1=primary).")
+def read_screen(player_id, interval, monitor):
+    """Watch the game screen and auto-log map + result via OCR. Run this on the gaming PC."""
+    import screen_reader as sr
+    sr.POLL_INTERVAL  = interval
+    sr.MONITOR_INDEX  = monitor
+    try:
+        asyncio.run(sr._main(player_id))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Screen reader stopped.[/yellow]")
+
+
+@cli.command()
+@click.argument("player_id", required=False)
+@click.option("--interval", "-i", default=120, help="Seconds between polls (default 120).")
+def watch(player_id, interval):
+    """Watch for new matches and auto-log results. Polls the API until Ctrl+C.
+
+    \b
+    Watches a specific player, or all tracked players if none given.
+    Stats update 5-15 min after a match ends — a 2-min poll interval is plenty.
+    Map name is logged as 'unknown'; fill it in with log-game afterward.
+    """
+    try:
+        if player_id:
+            run(watch_player(player_id, interval))
+        else:
+            run(watch_all(interval))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Watch stopped.[/yellow]")
 
 
 if __name__ == "__main__":

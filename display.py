@@ -4,7 +4,10 @@ from rich.table import Table
 from rich.panel import Panel
 
 from api import extract_hero_stats
-from database import get_snapshots, get_rank_history, get_hero_history, get_players
+from database import (
+    get_snapshots, get_rank_history, get_hero_history, get_players,
+    get_map_stats, get_teammate_stats, get_recent_games,
+)
 
 console = Console()
 
@@ -150,8 +153,11 @@ async def show_heroes(battletag: str, mode: str = "competitive", limit: int = 10
     table.add_column("Elims", justify="right")
     table.add_column("Deaths", justify="right")
     table.add_column("K/D", justify="right")
+    table.add_column("Acc%", justify="right", style="yellow")
     table.add_column("Damage", justify="right", style="red")
     table.add_column("Healing", justify="right", style="green")
+
+    total_elims = total_deaths = 0
 
     for hero in heroes[:limit]:
         hours = hero["time_played_seconds"] // 3600
@@ -159,6 +165,10 @@ async def show_heroes(battletag: str, mode: str = "competitive", limit: int = 10
         time_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
 
         kd = f"{hero['eliminations'] / hero['deaths']:.2f}" if hero["deaths"] > 0 else "∞"
+        acc = f"{hero['accuracy']}%" if hero.get("accuracy") is not None else "—"
+
+        total_elims += hero["eliminations"]
+        total_deaths += hero["deaths"]
 
         table.add_row(
             hero["hero"].replace("-", " ").title(),
@@ -168,9 +178,15 @@ async def show_heroes(battletag: str, mode: str = "competitive", limit: int = 10
             str(hero["eliminations"]),
             str(hero["deaths"]),
             kd,
+            acc,
             f"{hero['damage']:,}",
             f"{hero['healing']:,}",
         )
+
+    if len(heroes) > 1:
+        avg_kd = f"{total_elims / total_deaths:.2f}" if total_deaths > 0 else "∞"
+        table.add_section()
+        table.add_row("[dim]Avg K/D[/dim]", "", "", "", "", "", f"[bold]{avg_kd}[/bold]", "", "", "")
 
     console.print(table)
 
@@ -236,6 +252,97 @@ def _rank_value(r: dict) -> int:
     tier = r.get("tier") or 5
     div_val = RANK_ORDER.index(div) * 5 if div in RANK_ORDER else 0
     return div_val + (5 - tier)
+
+
+async def show_map_stats(battletag: str, mode: str | None = None):
+    rows = await get_map_stats(battletag, mode)
+    if not rows:
+        console.print(f"[yellow]No game logs for {battletag}. Use 'log-game' to record games.[/yellow]")
+        return
+
+    title = f"Map W/L — {battletag}"
+    if mode:
+        title += f" ({mode})"
+
+    table = Table(title=title)
+    table.add_column("Map", style="cyan")
+    table.add_column("Games", justify="right")
+    table.add_column("W", justify="right", style="green")
+    table.add_column("L", justify="right", style="red")
+    table.add_column("D", justify="right", style="dim")
+    table.add_column("Win%", justify="right")
+
+    for r in rows:
+        wr = r["winrate"] or 0
+        color = "green" if wr >= 55 else "red" if wr <= 45 else "yellow"
+        table.add_row(
+            r["map"],
+            str(r["games"]),
+            str(r["wins"]),
+            str(r["losses"]),
+            str(r["draws"]),
+            f"[{color}]{wr}%[/{color}]",
+        )
+
+    console.print(table)
+
+
+async def show_teammate_stats(battletag: str):
+    rows = await get_teammate_stats(battletag)
+    if not rows:
+        console.print(f"[yellow]No teammate data for {battletag}. Use 'log-game --teammates' to record games.[/yellow]")
+        return
+
+    table = Table(title=f"Teammate W/L — {battletag}")
+    table.add_column("Teammate", style="cyan")
+    table.add_column("Games", justify="right")
+    table.add_column("W", justify="right", style="green")
+    table.add_column("L", justify="right", style="red")
+    table.add_column("D", justify="right", style="dim")
+    table.add_column("Win%", justify="right")
+
+    for r in rows:
+        wr = r["winrate"] or 0
+        color = "green" if wr >= 55 else "red" if wr <= 45 else "yellow"
+        table.add_row(
+            r["teammate"],
+            str(r["games"]),
+            str(r["wins"]),
+            str(r["losses"]),
+            str(r["draws"]),
+            f"[{color}]{wr}%[/{color}]",
+        )
+
+    console.print(table)
+
+
+async def show_recent_games(battletag: str, limit: int = 20):
+    rows = await get_recent_games(battletag, limit)
+    if not rows:
+        console.print(f"[yellow]No game logs for {battletag}.[/yellow]")
+        return
+
+    table = Table(title=f"Recent Games — {battletag}")
+    table.add_column("Time", style="dim")
+    table.add_column("Map", style="cyan")
+    table.add_column("Result")
+    table.add_column("Hero")
+    table.add_column("Mode", style="dim")
+    table.add_column("Teammates", style="dim")
+
+    for r in rows:
+        result = r["result"]
+        color = "green" if result == "win" else "red" if result == "loss" else "yellow"
+        table.add_row(
+            r["timestamp"],
+            r["map"],
+            f"[{color}]{result.upper()}[/{color}]",
+            (r["hero"] or "—").replace("-", " ").title(),
+            r["mode"],
+            r["teammates"] or "—",
+        )
+
+    console.print(table)
 
 
 def _rank_value_from_text(text: str) -> int:

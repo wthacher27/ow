@@ -46,10 +46,29 @@ CREATE TABLE IF NOT EXISTS hero_stats (
     stats_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS game_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER NOT NULL REFERENCES players(id),
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    map TEXT NOT NULL,
+    result TEXT NOT NULL CHECK(result IN ('win', 'loss', 'draw')),
+    hero TEXT,
+    mode TEXT NOT NULL DEFAULT 'competitive',
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS game_teammates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id INTEGER NOT NULL REFERENCES game_logs(id),
+    teammate TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_snapshots_player ON snapshots(player_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_time ON snapshots(timestamp);
 CREATE INDEX IF NOT EXISTS idx_rank_player ON rank_history(player_id);
 CREATE INDEX IF NOT EXISTS idx_hero_snapshot ON hero_stats(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_game_logs_player ON game_logs(player_id);
+CREATE INDEX IF NOT EXISTS idx_game_teammates_game ON game_teammates(game_id);
 """
 
 
@@ -176,6 +195,84 @@ async def get_rank_history(battletag: str, role: str | None = None, limit: int =
                    ORDER BY rh.timestamp DESC LIMIT ?""",
                 (battletag, limit),
             )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def save_game_log(player_id: int, map_name: str, result: str, hero: str | None, mode: str, teammates: list[str], notes: str | None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO game_logs (player_id, map, result, hero, mode, notes) VALUES (?, ?, ?, ?, ?, ?)",
+            (player_id, map_name, result, hero, mode, notes),
+        )
+        game_id = cursor.lastrowid
+        for t in teammates:
+            await db.execute("INSERT INTO game_teammates (game_id, teammate) VALUES (?, ?)", (game_id, t))
+        await db.commit()
+        return game_id
+
+
+async def get_map_stats(battletag: str, mode: str | None = None) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        where = "p.battletag = ?"
+        params: list = [battletag]
+        if mode:
+            where += " AND g.mode = ?"
+            params.append(mode)
+        cursor = await db.execute(
+            f"""SELECT g.map,
+                       COUNT(*) AS games,
+                       SUM(g.result = 'win') AS wins,
+                       SUM(g.result = 'loss') AS losses,
+                       SUM(g.result = 'draw') AS draws,
+                       ROUND(100.0 * SUM(g.result = 'win') / COUNT(*), 1) AS winrate
+                FROM game_logs g
+                JOIN players p ON g.player_id = p.id
+                WHERE {where}
+                GROUP BY g.map
+                ORDER BY games DESC""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_teammate_stats(battletag: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT gt.teammate,
+                      COUNT(*) AS games,
+                      SUM(g.result = 'win') AS wins,
+                      SUM(g.result = 'loss') AS losses,
+                      SUM(g.result = 'draw') AS draws,
+                      ROUND(100.0 * SUM(g.result = 'win') / COUNT(*), 1) AS winrate
+               FROM game_teammates gt
+               JOIN game_logs g ON gt.game_id = g.id
+               JOIN players p ON g.player_id = p.id
+               WHERE p.battletag = ?
+               GROUP BY gt.teammate
+               ORDER BY games DESC""",
+            (battletag,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_recent_games(battletag: str, limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT g.*, GROUP_CONCAT(gt.teammate, ', ') AS teammates
+               FROM game_logs g
+               JOIN players p ON g.player_id = p.id
+               LEFT JOIN game_teammates gt ON gt.game_id = g.id
+               WHERE p.battletag = ?
+               GROUP BY g.id
+               ORDER BY g.timestamp DESC LIMIT ?""",
+            (battletag, limit),
+        )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 

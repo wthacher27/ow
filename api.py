@@ -17,6 +17,13 @@ async def fetch_player_summary(client: httpx.AsyncClient, player_id: str) -> dic
     return None
 
 
+async def fetch_stats_summary(client: httpx.AsyncClient, player_id: str) -> dict | None:
+    resp = await client.get(f"{BASE_URL}/players/{player_id}/stats/summary")
+    if resp.status_code == 200:
+        return resp.json()
+    return None
+
+
 async def fetch_player_stats(client: httpx.AsyncClient, player_id: str, mode: str = "competitive") -> dict | None:
     resp = await client.get(
         f"{BASE_URL}/players/{player_id}/stats",
@@ -69,6 +76,11 @@ def extract_hero_stats(stats_data: dict) -> list[dict]:
         deaths = _get_stat(categories, "combat", "deaths", 0)
         damage = _get_stat(categories, "combat", "all_damage_done", 0) or _get_stat(categories, "combat", "hero_damage_done", 0)
         healing = _get_stat(categories, "assists", "healing_done", 0)
+        accuracy = _get_stat(categories, "combat", "weapon_accuracy", None)
+        # prefer scoped accuracy for heroes that have it (Ana, Widow, etc.)
+        scoped = _get_stat(categories, "hero_specific", "scoped_accuracy", None)
+        if scoped is not None:
+            accuracy = scoped
 
         extra = {}
         for cat in categories:
@@ -84,6 +96,7 @@ def extract_hero_stats(stats_data: dict) -> list[dict]:
             "deaths": deaths,
             "damage": damage,
             "healing": healing,
+            "accuracy": accuracy,
             "extra": extra,
         })
     return heroes
