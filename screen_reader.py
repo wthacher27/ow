@@ -29,7 +29,7 @@ except ImportError as e:
     print("Run: pip install mss Pillow pytesseract")
     sys.exit(1)
 
-from database import init_db, get_players, save_game_log
+from database import init_db, get_players, save_game_log, get_recent_games
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
 TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -109,9 +109,9 @@ def _find_map(text: str) -> str | None:
 
 def _find_result(text: str) -> str | None:
     t = text.upper()
-    if "VICTORY" in t:
+    if "VICTORY" in t or re.search(r"\bWIN\b", t):
         return "win"
-    if "DEFEAT" in t:
+    if "DEFEAT" in t or re.search(r"\bLOSS\b", t) or re.search(r"\bLOSE\b", t):
         return "loss"
     if "DRAW" in t:
         return "draw"
@@ -247,6 +247,66 @@ class ScreenReader:
             except Exception as e:
                 print(f"[WARN] tick error: {e}")
             await asyncio.sleep(POLL_INTERVAL)
+
+
+def capture_full(monitor_index: int | None = None) -> Image.Image:
+    """Grab the whole monitor - used for the History/Replays list screen,
+    which shows many matches at once rather than one loading/result screen."""
+    with mss.mss() as sct:
+        mon = sct.monitors[monitor_index or MONITOR_INDEX]
+        raw = sct.grab(mon)
+        return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+
+
+def parse_history_rows(text: str) -> list[dict]:
+    """Parse OCR text from the History/Replays screen into match rows.
+
+    Each row normally shows a map name and a result on the same line; if OCR
+    splits a row across two lines (icon/spacing artifacts), fall back to a
+    2-line window before giving up on that line.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    rows = []
+    i = 0
+    while i < len(lines):
+        found_map = _find_map(lines[i])
+        found_result = _find_result(lines[i])
+        consumed = 1
+        if not (found_map and found_result) and i + 1 < len(lines):
+            window = lines[i] + " " + lines[i + 1]
+            fm = _find_map(window)
+            fr = _find_result(window)
+            if fm and fr:
+                found_map, found_result, consumed = fm, fr, 2
+        if found_map and found_result:
+            rows.append({"map": found_map, "result": found_result})
+            i += consumed
+        else:
+            i += 1
+    return rows
+
+
+async def scan_history_screen(battletag: str, monitor_index: int | None = None) -> list[dict]:
+    """One-shot scan of the currently displayed History/Replays screen.
+
+    Returns parsed rows (most recent first, as shown on screen), each tagged
+    with 'likely_duplicate' if that many (map, result) pairs are already in
+    the game log - a best-effort dedup hint since OCR can't read timestamps
+    reliably, not a guarantee.
+    """
+    img = capture_full(monitor_index)
+    text = _ocr(img)
+    rows = parse_history_rows(text)
+
+    existing = await get_recent_games(battletag, limit=100)
+    existing_counts = Counter((r["map"], r["result"]) for r in existing)
+    seen_counts: Counter = Counter()
+    for row in rows:
+        key = (row["map"], row["result"])
+        seen_counts[key] += 1
+        row["likely_duplicate"] = seen_counts[key] <= existing_counts.get(key, 0)
+
+    return rows
 
 
 async def _main(battletag: str):

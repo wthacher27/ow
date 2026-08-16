@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("OW_DB_PATH", Path(__file__).parent / "ow_stats.db"))
+DB_PATH = Path(os.environ.get("OW_DB_PATH", Path(__file__).parent / "data" / "ow_stats.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS players (
