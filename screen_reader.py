@@ -45,9 +45,9 @@ if sys.platform == "win32":
 # All current OW2 maps (lowercase for matching)
 KNOWN_MAPS = {
     # Control
-    "ilios", "lijiang tower", "nepal", "oasis", "samoa", "antarctic peninsula",
+    "ilios", "lijiang tower", "nepal", "oasis", "samoa", "antarctic peninsula", "busan",
     # Escort
-    "dorado", "havana", "junkertown", "rialto", "route 66",
+    "dorado", "havana", "junkertown", "rialto", "route 66", "circuit royal",
     "watchpoint: gibraltar", "watchpoint gibraltar", "shambali monastery", "paraíso", "paraiso",
     # Hybrid
     "blizzard world", "eichenwalde", "hollywood", "king's row", "kings row",
@@ -55,7 +55,7 @@ KNOWN_MAPS = {
     # Push
     "colosseo", "esperança", "esperanca", "new queen street", "runasapi", "hanaoka",
     # Flashpoint
-    "new junk city", "suravasa",
+    "new junk city", "suravasa", "aatlis",
     # Clash
     "throne of anubis",
     # Deathmatch / Workshop
@@ -89,12 +89,55 @@ def _preprocess(img: Image.Image, scale: float = 2.0) -> Image.Image:
     return img
 
 
-def _ocr(img: Image.Image, region=None) -> str:
+_TESS_CONFIG = "--oem 3 --psm 3"
+
+
+def _ocr(img: Image.Image, region=None, config: str = _TESS_CONFIG) -> str:
     if region:
         img = img.crop(region)
     processed = _preprocess(img)
-    cfg = "--oem 3 --psm 3"
-    return pytesseract.image_to_string(processed, config=cfg)
+    return pytesseract.image_to_string(processed, config=config)
+
+
+_BADGE_COLORS = {"win": (25, 211, 25), "loss": (209, 39, 39), "draw": (152, 152, 152)}
+_BADGE_COLOR_TOL = 20
+
+
+def _classify_badge_color(rgb) -> str | None:
+    r, g, b = rgb[:3]
+    for name, (tr, tg, tb) in _BADGE_COLORS.items():
+        if abs(r - tr) <= _BADGE_COLOR_TOL and abs(g - tg) <= _BADGE_COLOR_TOL and abs(b - tb) <= _BADGE_COLOR_TOL:
+            return name
+    return None
+
+
+def _find_badge_bands(img: Image.Image) -> list[tuple[int, int, str]]:
+    """Scan the badge column top-to-bottom for contiguous vertical bands of a
+    single result color; each band marks one match row and its result.
+
+    The History screen renders WIN/LOSS/DRAW as a solid-color pill badge in a
+    stylized font OCR can't read reliably (see `_classify_badge_color`), but
+    the fill color is a clean, unambiguous signal - and since every row has
+    exactly one badge, the bands double as row boundaries for map-name OCR.
+    """
+    w, h = img.size
+    xs = list(range(int(w * 0.86), w, 4))
+    px = img.load()
+    bands = []
+    band_color = None
+    band_start = 0
+    for y in range(h):
+        votes: Counter = Counter(c for x in xs if (c := _classify_badge_color(px[x, y])))
+        top = votes.most_common(1)
+        color = top[0][0] if top and top[0][1] >= 3 else None
+        if color != band_color:
+            if band_color is not None and y - band_start >= 15:
+                bands.append((band_start, y, band_color))
+            band_color = color
+            band_start = y
+    if band_color is not None and h - band_start >= 15:
+        bands.append((band_start, h, band_color))
+    return bands
 
 
 def _find_map(text: str) -> str | None:
@@ -258,31 +301,26 @@ def capture_full(monitor_index: int | None = None) -> Image.Image:
         return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
 
-def parse_history_rows(text: str) -> list[dict]:
-    """Parse OCR text from the History/Replays screen into match rows.
+_ROW_TESS_CONFIG = "--oem 3 --psm 6"
 
-    Each row normally shows a map name and a result on the same line; if OCR
-    splits a row across two lines (icon/spacing artifacts), fall back to a
-    2-line window before giving up on that line.
+
+def parse_history_rows(img: Image.Image) -> list[dict]:
+    """Parse the History/Replays screen into match rows.
+
+    Running OCR on the whole screen in one shot lets Tesseract's automatic
+    page segmentation (`--psm 3`) get confused by the busy layout and drop
+    rows unpredictably. Instead, find each row's bounds from its badge (see
+    `_find_badge_bands`) and OCR just that row's narrow map-name crop.
     """
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     rows = []
-    i = 0
-    while i < len(lines):
-        found_map = _find_map(lines[i])
-        found_result = _find_result(lines[i])
-        consumed = 1
-        if not (found_map and found_result) and i + 1 < len(lines):
-            window = lines[i] + " " + lines[i + 1]
-            fm = _find_map(window)
-            fr = _find_result(window)
-            if fm and fr:
-                found_map, found_result, consumed = fm, fr, 2
-        if found_map and found_result:
-            rows.append({"map": found_map, "result": found_result})
-            i += consumed
-        else:
-            i += 1
+    pad = 6
+    x0, x1 = int(img.width * 0.22), int(img.width * 0.36)
+    for y0, y1, result in _find_badge_bands(img):
+        row_crop = img.crop((x0, max(0, y0 - pad), x1, min(img.height, y1 + pad)))
+        text = _ocr(row_crop, config=_ROW_TESS_CONFIG)
+        found_map = _find_map(text)
+        if found_map:
+            rows.append({"map": found_map, "result": result})
     return rows
 
 
@@ -295,8 +333,7 @@ async def scan_history_screen(battletag: str, monitor_index: int | None = None) 
     reliably, not a guarantee.
     """
     img = capture_full(monitor_index)
-    text = _ocr(img)
-    rows = parse_history_rows(text)
+    rows = parse_history_rows(img)
 
     existing = await get_recent_games(battletag, limit=100)
     existing_counts = Counter((r["map"], r["result"]) for r in existing)

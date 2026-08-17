@@ -203,6 +203,12 @@ class App:
         self.history_btn.configure(state="disabled")
         self.status_var.set("Scanning History/Replays screen...")
         self._log(f">>> Scan History — {player}")
+        # Hide our own window first - it's on top of the game to be clickable,
+        # and would otherwise occlude the very rows we're trying to capture.
+        self.root.withdraw()
+        self.root.after(200, self._start_history_scan, player)
+
+    def _start_history_scan(self, player):
         threading.Thread(target=self._run_history_scan, args=(player,), daemon=True).start()
 
     def _run_history_scan(self, player):
@@ -218,6 +224,7 @@ class App:
         return await sr.scan_history_screen(player)
 
     def _on_history_scanned(self, player, rows):
+        self.root.deiconify()
         self.history_btn.configure(state="normal")
         self.status_var.set("Idle")
         if rows is None:
